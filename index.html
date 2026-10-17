@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Fireworks</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(120% 85% at 50% -10%, #0c1330 0%, #060a1c 45%, #03050e 78%, #010208 100%);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  canvas { position: fixed; inset: 0; display: block; }
+  #bg { z-index: 0; }
+  #fx { z-index: 1; touch-action: none; cursor: crosshair; mix-blend-mode: screen; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 30px; z-index: 2;
+    text-align: center; pointer-events: none; user-select: none;
+    color: rgba(214, 224, 255, 0.42);
+    font-size: 12px; font-weight: 500; letter-spacing: 0.22em; text-transform: uppercase;
+    transition: opacity 1.2s ease;
+  }
+  #hint.gone { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="bg" aria-hidden="true"></canvas>
+<canvas id="fx" role="application" aria-label="Fireworks canvas. Click anywhere or press Space to launch a firework."></canvas>
+<div id="hint">Click anywhere to launch &nbsp;&middot;&nbsp; hold &amp; drag to stream</div>
+<script>
+(() => {
+'use strict';
+
+const bg = document.getElementById('bg');
+const fx = document.getElementById('fx');
+const bctx = bg.getContext('2d');
+const ctx = fx.getContext('2d');
+const hint = document.getElementById('hint');
+
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+let W = 0, H = 0, DPR = 1;
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  for (const c of [bg, fx]) {
+    c.width = Math.max(1, Math.round(W * DPR));
+    c.height = Math.max(1, Math.round(H * DPR));
+  }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  bctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.lineCap = 'round';
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  paintStars();
+}
+
+function paintStars() {
+  bctx.clearRect(0, 0, W, H);
+  const n = Math.round((W * H) / 9000);
+  for (let i = 0; i < n; i++) {
+    const x = Math.random() * W;
+    const y = Math.random() * H * 0.9;
+    const r = Math.random() < 0.85 ? rand(0.3, 1.0) : rand(0.8, 1.7);
+    bctx.globalAlpha = rand(0.08, 0.5);
+    bctx.fillStyle = Math.random() < 0.25 ? '#bcd0ff' : '#ffffff';
+    bctx.beginPath();
+    bctx.arc(x, y, r, 0, Math.PI * 2);
+    bctx.fill();
+  }
+  bctx.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------- entities
+
+const rockets = [];
+const parts = [];
+const flashes = [];
+const HARD_CAP = 3200;
+const RK_G = 430; // rocket gravity, px/s^2
+
+function launch(tx, ty) {
+  tx = Math.max(20, Math.min(tx, W - 20));
+  ty = Math.max(H * 0.06, Math.min(ty, H * 0.85));
+  const sx = tx + rand(-90, 90);
+  const sy = H + 14;
+  const T = rand(0.5, 0.8) + ((sy - ty) / H) * 0.3;
+  rockets.push({
+    x: sx, y: sy, px: sx, py: sy,
+    vx: (tx - sx) / T,
+    vy: (ty - sy - 0.5 * RK_G * T * T) / T,
+    t: 0, T,
+  });
+}
+
+function addPart(x, y, vx, vy, o) {
+  if (parts.length >= HARD_CAP) return;
+  parts.push({
+    x, y, px: x, py: y, vx, vy,
+    age: 0, life: o.life, drag: o.drag, g: o.g,
+    h: o.h, s: o.s, l: o.l, r: o.r,
+    col: 'hsl(' + o.h + ', ' + o.s + '%, ' + o.l + '%)',
+    flick: o.flick || false,
+    seed: Math.random() * Math.PI * 2,
+    crack: o.crack || false, cracked: false,
+  });
+}
+
+function pickType() {
+  const r = Math.random();
+  if (r < 0.30) return 'peony';
+  if (r < 0.46) return 'ring';
+  if (r < 0.62) return 'double';
+  if (r < 0.76) return 'willow';
+  if (r < 0.90) return 'dense';
+  return 'crackle';
+}
+
+function burst(x, y) {
+  const m = Math.min(W, H);
+  const S = m * rand(0.19, 0.29); // burst speed
+  const hue = ((pick([352, 14, 32, 46, 96, 150, 172, 195, 218, 262, 292, 320]) + rand(-8, 8)) + 360) % 360;
+  const budget = Math.max(0.25, Math.min(1, (HARD_CAP - parts.length) / 1000));
+  const N = (n) => Math.max(8, Math.round(n * budget));
+
+  flashes.push({ kind: 'flash', x, y, age: 0, life: 0.3, r0: 6, r1: m * 0.13, h: hue });
+  if (Math.random() < 0.3) flashes.push({ kind: 'wave', x, y, age: 0, life: 0.45, r1: m * 0.22 });
+
+  const t = pickType();
+
+  if (t === 'peony') {
+    const shell = Math.random() < 0.6;
+    const n = N(rand(95, 135));
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = S * (shell ? rand(0.8, 1) : 0.25 + 0.75 * Math.sqrt(Math.random()));
+      addPart(x, y, Math.cos(a) * sp, Math.sin(a) * sp, {
+        life: rand(1.1, 1.9), drag: 1.35, g: 140,
+        h: hue, s: 100, l: rand(58, 70), r: rand(1.5, 2.6), flick: true,
+      });
+    }
+  } else if (t === 'ring') {
+    const n = N(rand(60, 84));
+    const tilt = Math.random() * Math.PI;
+    const squish = rand(0.32, 0.7);
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + rand(-0.03, 0.03);
+      const ex = Math.cos(a) * S * rand(0.92, 1.02);
+      const ey = Math.sin(a) * S * squish * rand(0.92, 1.02);
+      addPart(x, y, ex * Math.cos(tilt) - ey * Math.sin(tilt), ex * Math.sin(tilt) + ey * Math.cos(tilt), {
+        life: rand(1.2, 1.8), drag: 1.2, g: 150,
+        h: hue, s: 100, l: rand(60, 70), r: rand(1.6, 2.4), flick: true,
+      });
+    }
+  } else if (t === 'double') {
+    const h2 = (hue + pick([140, 160, 180, 40, 200])) % 360;
+    const n1 = N(rand(65, 90));
+    for (let i = 0; i < n1; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = S * rand(0.78, 1);
+      addPart(x, y, Math.cos(a) * sp, Math.sin(a) * sp, {
+        life: rand(1.1, 1.8), drag: 1.35, g: 140,
+        h: hue, s: 100, l: rand(58, 68), r: rand(1.4, 2.4), flick: true,
+      });
+    }
+    const n2 = N(rand(40, 60));
+    for (let i = 0; i < n2; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = S * 0.55 * Math.sqrt(Math.random());
+      addPart(x, y, Math.cos(a) * sp, Math.sin(a) * sp, {
+        life: rand(0.9, 1.5), drag: 1.6, g: 120,
+        h: h2, s: 100, l: rand(64, 76), r: rand(1.4, 2.2), flick: true,
+      });
+    }
+  } else if (t === 'willow') {
+    const n = N(rand(70, 95));
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = S * rand(0.45, 0.95);
+      addPart(x, y, Math.cos(a) * sp, Math.sin(a) * sp, {
+        life: rand(2.0, 2.9), drag: 0.5, g: 250,
+        h: rand(40, 52), s: 100, l: rand(55, 68), r: rand(1.2, 2.0), flick: true,
+      });
+    }
+  } else if (t === 'dense') {
+    const n = N(rand(110, 150));
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = S * 0.9 * Math.sqrt(Math.random());
+      const white = Math.random() < 0.2;
+      addPart(x, y, Math.cos(a) * sp, Math.sin(a) * sp, {
+        life: rand(0.9, 1.5), drag: 1.6, g: 120,
+        h: white ? 45 : hue, s: white ? 40 : 100, l: white ? 85 : rand(58, 70), r: rand(1.3, 2.4), flick: true,
+      });
+    }
+  } else { // crackle
+    const n = N(rand(55, 80));
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = S * rand(0.7, 1);
+      addPart(x, y, Math.cos(a) * sp, Math.sin(a) * sp, {
+        life: rand(0.9, 1.3), drag: 1.3, g: 130,
+        h: hue, s: 100, l: rand(60, 72), r: rand(1.4, 2.2), crack: true,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------- update
+
+function update(dt) {
+  for (let i = rockets.length - 1; i >= 0; i--) {
+    const k = rockets[i];
+    k.t += dt;
+    k.px = k.x; k.py = k.y;
+    k.vy += RK_G * dt;
+    k.x += k.vx * dt;
+    k.y += k.vy * dt;
+    if (parts.length < HARD_CAP) {
+      for (let s = 0; s < 2; s++) {
+        addPart(k.x + rand(-1.5, 1.5), k.y + rand(-1.5, 1.5),
+          -k.vx * 0.12 + rand(-28, 28), -k.vy * 0.12 + rand(-28, 28), {
+            life: rand(0.25, 0.55), drag: 2.6, g: 210,
+            h: rand(36, 50), s: 100, l: rand(55, 70), r: rand(1.0, 1.7), flick: true,
+          });
+      }
+    }
+    if (k.t >= k.T) {
+      rockets[i] = rockets[rockets.length - 1];
+      rockets.pop();
+      burst(k.x, k.y);
+    }
+  }
+
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.age += dt;
+    if (p.age >= p.life) {
+      parts[i] = parts[parts.length - 1];
+      parts.pop();
+      continue;
+    }
+    if (p.crack && !p.cracked && p.age > p.life * 0.5) {
+      p.cracked = true;
+      for (let s = 0; s < 3; s++) {
+        const a = Math.random() * Math.PI * 2;
+        const sp = rand(30, 130);
+        addPart(p.x, p.y, Math.cos(a) * sp, Math.sin(a) * sp, {
+          life: rand(0.14, 0.32), drag: 3, g: 60,
+          h: 45, s: 25, l: 92, r: 1.2,
+        });
+      }
+    }
+    p.px = p.x; p.py = p.y;
+    const f = Math.exp(-p.drag * dt);
+    p.vx *= f;
+    p.vy = p.vy * f + p.g * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+  }
+
+  for (let i = flashes.length - 1; i >= 0; i--) {
+    const fl = flashes[i];
+    fl.age += dt;
+    if (fl.age >= fl.life) {
+      flashes[i] = flashes[flashes.length - 1];
+      flashes.pop();
+    }
+  }
+}
+
+// ---------------------------------------------------------------- render
+
+function render() {
+  // fade previous frame toward black -> glowing trails; residue bottoms out
+  // near black, which is neutral under the canvas' screen blending
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = 'lighter';
+
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const k = p.age / p.life;
+    let a = 1 - k;
+    a = a * a * (3 - 2 * a);
+    if (p.flick && k > 0.5) a *= 0.35 + 0.65 * Math.abs(Math.sin(p.age * 34 + p.seed * 7));
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = p.col;
+    ctx.lineWidth = p.r * (1 - k * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(p.px, p.py);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+
+  for (let i = 0; i < rockets.length; i++) {
+    const k = rockets[i];
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = 'hsl(46, 100%, 72%)';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(k.x - k.vx * 0.028, k.y - k.vy * 0.028);
+    ctx.lineTo(k.x, k.y);
+    ctx.stroke();
+    ctx.fillStyle = '#fff7df';
+    ctx.beginPath();
+    ctx.arc(k.x, k.y, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  for (let i = 0; i < flashes.length; i++) {
+    const fl = flashes[i];
+    const k = fl.age / fl.life;
+    ctx.globalAlpha = 1;
+    if (fl.kind === 'flash') {
+      const r = fl.r0 + (fl.r1 - fl.r0) * (1 - (1 - k) * (1 - k));
+      const a = (1 - k) * (1 - k);
+      const g = ctx.createRadialGradient(fl.x, fl.y, 0, fl.x, fl.y, r);
+      g.addColorStop(0, 'rgba(255, 255, 255, ' + (0.85 * a).toFixed(3) + ')');
+      g.addColorStop(0.25, 'hsla(' + fl.h + ', 100%, 70%, ' + (0.5 * a).toFixed(3) + ')');
+      g.addColorStop(1, 'hsla(' + fl.h + ', 100%, 60%, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(fl.x, fl.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      const r = 10 + fl.r1 * (1 - (1 - k) * (1 - k));
+      ctx.globalAlpha = 0.35 * (1 - k);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5 * (1 - k) + 0.3;
+      ctx.beginPath();
+      ctx.arc(fl.x, fl.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------- input
+
+let pointerDown = false;
+let lastStream = 0;
+let lastInteract = performance.now();
+
+function interact() {
+  lastInteract = performance.now();
+  hint.classList.add('gone');
+}
+
+window.addEventListener('pointerdown', (e) => {
+  if (e.button !== undefined && e.button !== 0) return;
+  pointerDown = true;
+  interact();
+  launch(e.clientX, e.clientY);
+}, { passive: true });
+
+window.addEventListener('pointermove', (e) => {
+  if (!pointerDown) return;
+  const now = performance.now();
+  if (now - lastStream > 110) {
+    lastStream = now;
+    launch(e.clientX, e.clientY);
+  }
+}, { passive: true });
+
+window.addEventListener('pointerup', () => { pointerDown = false; }, { passive: true });
+window.addEventListener('pointercancel', () => { pointerDown = false; }, { passive: true });
+window.addEventListener('blur', () => { pointerDown = false; });
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault();
+    interact();
+    launch(rand(W * 0.15, W * 0.85), rand(H * 0.12, H * 0.5));
+  }
+});
+
+// gentle ambient show when idle (skipped for reduced-motion users)
+const reducedMotion = reduced;
+let lastAmbient = -6000;
+let nextAmbient = 2200;
+function maybeAmbient(now) {
+  if (reducedMotion || pointerDown || document.hidden) return;
+  if (now - lastInteract < 6000 || now - lastAmbient < nextAmbient) return;
+  lastAmbient = now;
+  nextAmbient = rand(1600, 4200);
+  launch(rand(W * 0.18, W * 0.82), rand(H * 0.12, H * 0.45));
+}
+
+// ---------------------------------------------------------------- main loop
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt <= 0) return;
+  if (dt > 0.05) dt = 0.05;
+  maybeAmbient(now);
+  update(dt);
+  render();
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+if (!reduced) {
+  for (let i = 0; i < 3; i++) {
+    setTimeout(() => launch(rand(W * 0.2, W * 0.8), rand(H * 0.15, H * 0.42)), 300 + i * 450);
+  }
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
